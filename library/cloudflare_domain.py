@@ -71,6 +71,9 @@ class CloudflareException(Exception):
     pass
 
 class Cloudflare(object):
+    mode_types = ['A', 'AAAA', 'CNAME']
+    service_modes = ['DNS', 'CDN']
+
     def __init__(self, email, token, zone):
         self.url   = 'https://www.cloudflare.com/api_json.html'
         self.email = email
@@ -95,11 +98,9 @@ class Cloudflare(object):
         return self.request(a='rec_load_all')
 
     def rec_new(self, type, name, content, ttl=1, mode=None):
-        mode_types = ['A', 'AAAA', 'CNAME']
-
         # mode is only allowed in DNS record types
-        if mode and not type in mode_types:
-            raise Exception(mode, 'is only allowed with one of this types:', mode_types)
+        if mode and not type in Cloudflare.mode_types:
+            raise Exception(mode, 'is only allowed with one of this types:', Cloudflare.mode_types)
 
         return self.request(
             a='rec_new',
@@ -107,7 +108,22 @@ class Cloudflare(object):
             name=name,
             content=content,
             ttl=ttl,
-            service_mode=service_mode.index(mode) if mode else None
+            service_mode=mode,
+        )
+
+    def rec_edit(self, id, type, name, content, ttl=1, mode=None):
+        # mode is only allowed in DNS record types
+        if mode and not type in Cloudflare.mode_types:
+            raise Exception(mode, 'is only allowed with one of this types:', Cloudflare.mode_types, mode, type)
+
+        return self.request(
+            a='rec_edit',
+            id=id,
+            type=type,
+            name=name,
+            content=content,
+            ttl=ttl,
+            service_mode=mode,
         )
 
     def rec_delete(self, id):
@@ -132,19 +148,30 @@ def cloudflare_domain(module):
             existing_record = each
             break
 
-    if state == 'present':
-        if existing_record:
-            module.exit_json(changed=False, name=module.params['name'], type=type, content=content)
+    if existing_record:
+        record_id = existing_record['rec_id']
 
-        if not module.check_mode:
+    if state == 'present':
+        mode = module.params['mode']
+        mode = str(Cloudflare.service_modes.index(mode)) if mode else None
+
+        if existing_record:
+            service_mode = existing_record['service_mode']
+            if mode is None or mode == service_mode:
+                module.exit_json(changed=False, name=name, type=type, content=content)
+            else:
+                response = cloudflare.rec_edit(record_id, type, name, content, mode=mode)
+                module.exit_json(changed=True, name=name, type=type, content=content, service_mode=mode)
+
+        elif not module.check_mode:
             response = cloudflare.rec_new(type, module.params['name'], content, mode=module.params['mode'])
 
-        module.exit_json(changed=True, name=module.params['name'], type=type, content=content, service_mode=module.params['mode'])
+            module.exit_json(changed=True, name=module.params['name'], type=type, content=content, service_mode=module.params['mode'])
+
+        # invalid state!
 
     elif state == 'absent':
         if existing_record:
-            record_id = existing_record['rec_id']
-
             if not module.check_mode:
                 response = cloudflare.rec_delete(record_id)
 
@@ -162,7 +189,6 @@ def cloudflare_domain(module):
 
     module.fail_json(msg='Unknown value "{0}" for argument state. Expected one of: present, absent.')
 
-service_mode = ['DNS', 'CDN']
 def main():
     domain_types = ['A', 'CNAME', 'MX', 'TXT', 'SPF', 'AAAA', 'NS', 'SRV', 'LOC']
 
@@ -172,7 +198,7 @@ def main():
             name    = dict(required=True),
             zone    = dict(required=True, aliases=['z']),
             type    = dict(required=True, choices=domain_types),
-            mode    = dict(default='DNS', choices=service_mode),
+            mode    = dict(default='DNS', choices=Cloudflare.service_modes),
             content = dict(required=True),
             email   = dict(no_log=True, default=os.environ.get('CLOUDFLARE_API_EMAIL')),
             token   = dict(no_log=True, default=os.environ.get('CLOUDFLARE_API_TOKEN'), aliases=['tkn']),
